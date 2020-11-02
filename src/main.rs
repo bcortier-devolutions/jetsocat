@@ -1,5 +1,7 @@
 use seahorse::{App, Command, Context};
+use slog::*;
 use std::env;
+use std::future::Future;
 use tokio::runtime;
 
 fn main() {
@@ -18,14 +20,13 @@ fn main() {
         .version(env!("CARGO_PKG_VERSION"))
         .usage(format!("{} [command]", env!("CARGO_PKG_NAME")))
         .command(connect_command())
-        .command(accept_command());
+        .command(accept_command())
+        .command(listen_command());
 
     app.run(args);
 }
 
-fn setup_logger() -> slog::Logger {
-    use slog::o;
-    use slog::Drain;
+fn setup_logger(filename: &str) -> slog::Logger {
     use std::fs::OpenOptions;
     use std::panic;
 
@@ -33,7 +34,7 @@ fn setup_logger() -> slog::Logger {
         .create(true)
         .write(true)
         .truncate(true)
-        .open("jetsocat.log")
+        .open(filename)
         .unwrap();
 
     let decorator = slog_term::PlainDecorator::new(file);
@@ -43,10 +44,22 @@ fn setup_logger() -> slog::Logger {
 
     let logger_cloned = logger.clone();
     panic::set_hook(Box::new(move |panic_info| {
-        slog::error!(logger_cloned, "{:?}", panic_info);
+        slog::error!(logger_cloned, "{}", panic_info);
     }));
 
     logger
+}
+
+pub fn run<F: Future<Output = anyhow::Result<()>>>(log: Logger, f: F) {
+    let rt = runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime build");
+
+    match rt.block_on(f) {
+        Ok(()) => info!(log, "Terminated successfuly"),
+        Err(e) => error!(log, "Failure: {}", e),
+    };
 }
 
 fn connect_command() -> Command {
@@ -61,16 +74,9 @@ fn connect_command() -> Command {
 }
 
 pub fn connect_action(c: &Context) {
-    let addr = c.args.first().unwrap().clone();
-
-    let rt = runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-
-    let log = setup_logger();
-
-    rt.block_on(jetsocat::connect(addr, log)).unwrap();
+    let addr = c.args.first().expect("addr is missing").clone();
+    let log = setup_logger("connect.log");
+    run(log.clone(), jetsocat::client::connect(addr, log));
 }
 
 fn accept_command() -> Command {
@@ -85,14 +91,21 @@ fn accept_command() -> Command {
 }
 
 pub fn accept_action(c: &Context) {
-    let addr = c.args.first().unwrap().clone();
+    let addr = c.args.first().expect("addr is missing").clone();
+    let log = setup_logger("accept.log");
+    run(log.clone(), jetsocat::server::accept(addr, log));
+}
 
-    let rt = runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
+fn listen_command() -> Command {
+    Command::new("listen")
+        .description("Listen for an incoming connection and pipe with powershell")
+        .alias("a")
+        .usage(format!("{} listen BINDING_ADDRESS", env!("CARGO_PKG_NAME")))
+        .action(listen_action)
+}
 
-    let log = setup_logger();
-
-    rt.block_on(jetsocat::accept(addr, log)).unwrap();
+pub fn listen_action(c: &Context) {
+    let addr = c.args.first().expect("addr is missing").clone();
+    let log = setup_logger("listen.log");
+    run(log.clone(), jetsocat::server::listen(addr, log));
 }
